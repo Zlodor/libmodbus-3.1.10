@@ -1037,7 +1037,8 @@ static uint16_t crc16(uint8_t *buffer, uint16_t buffer_length)
 
 static int _modbus_rtu_o_tcp_send_msg_pre(uint8_t *req, int req_length)
 {
-    uint16_t crc = crc16(req, req_length);
+    // +6/-6 for skip tcp header
+    uint16_t crc = crc16((req+6), req_length-6);
 
     /* According to the MODBUS specs (p. 14), the low order byte of the CRC comes
      * first in the RTU message */
@@ -1124,7 +1125,7 @@ const modbus_backend_t _modbus_rtu_o_tcp_backend = {
     _modbus_tcp_free
 };
 
-modbus_t *_modbus_new_rtu_o_tcp(const char *ip, int port)
+modbus_t *modbus_new_rtu_o_tcp(const char *ip, int port)
 {
     modbus_t *ctx;
     modbus_tcp_t *ctx_tcp;
@@ -1186,4 +1187,111 @@ modbus_t *_modbus_new_rtu_o_tcp(const char *ip, int port)
     ctx_tcp->t_id = 0;
 
     return ctx;
+}
+
+/* Listens for any request from one or many modbus masters in TCP */
+int modbus_rtu_o_tcp_listen(modbus_t *ctx, int nb_connection)
+{
+    int new_s;
+    int enable;
+    int flags;
+    struct sockaddr_in addr;
+    modbus_tcp_t *ctx_tcp;
+    int rc;
+
+    if (ctx == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    ctx_tcp = ctx->backend_data;
+
+#ifdef OS_WIN32
+    if (_modbus_tcp_init_win32() == -1) {
+        return -1;
+    }
+#endif
+
+    flags = SOCK_STREAM;
+
+#ifdef SOCK_CLOEXEC
+    flags |= SOCK_CLOEXEC;
+#endif
+
+    new_s = socket(PF_INET, flags, IPPROTO_TCP);
+    if (new_s == -1) {
+        return -1;
+    }
+
+    enable = 1;
+    if (setsockopt(new_s, SOL_SOCKET, SO_REUSEADDR, (char *) &enable, sizeof(enable)) ==
+        -1) {
+        close(new_s);
+        return -1;
+    }
+
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    /* If the modbus port is < to 1024, we need the setuid root. */
+    addr.sin_port = htons(ctx_tcp->port);
+    if (ctx_tcp->ip[0] == '0') {
+        /* Listen any addresses */
+        addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    } else {
+        /* Listen only specified IP address */
+        rc = inet_pton(addr.sin_family, ctx_tcp->ip, &(addr.sin_addr));
+        if (rc <= 0) {
+            if (ctx->debug) {
+                fprintf(stderr, "Invalid IP address: %s\n", ctx_tcp->ip);
+            }
+            close(new_s);
+            return -1;
+        }
+    }
+
+    if (bind(new_s, (struct sockaddr *) &addr, sizeof(addr)) == -1) {
+        close(new_s);
+        return -1;
+    }
+
+    if (listen(new_s, nb_connection) == -1) {
+        close(new_s);
+        return -1;
+    }
+
+    return new_s;
+}
+
+int modbus_rtu_o_tcp_accept(modbus_t *ctx, int *s)
+{
+    struct sockaddr_in addr;
+    socklen_t addrlen;
+
+    if (ctx == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    addrlen = sizeof(addr);
+#ifdef HAVE_ACCEPT4
+    /* Inherit socket flags and use accept4 call */
+    ctx->s = accept4(*s, (struct sockaddr *) &addr, &addrlen, SOCK_CLOEXEC);
+#else
+    ctx->s = accept(*s, (struct sockaddr *) &addr, &addrlen);
+#endif
+
+    if (ctx->s < 0) {
+        return -1;
+    }
+
+    if (ctx->debug) {
+        char buf[INET_ADDRSTRLEN];
+        if (inet_ntop(AF_INET, &(addr.sin_addr), buf, INET_ADDRSTRLEN) == NULL) {
+            fprintf(stderr, "Client connection accepted from unparsable IP.\n");
+        } else {
+            printf("Client connection accepted from %s.\n", buf);
+        }
+    }
+
+    return ctx->s;
 }
