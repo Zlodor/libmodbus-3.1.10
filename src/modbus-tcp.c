@@ -1067,7 +1067,7 @@ static int _modbus_rtu_o_tcp_check_integrity(modbus_t *ctx, uint8_t *msg, const 
 {
     uint16_t crc_calculated;
     uint16_t crc_received;
-    int slave = msg[0];
+    int slave = msg[6];
 
     /* Filter on the Modbus unit identifier (slave) in RTU mode to avoid useless
      * CRC computing. */
@@ -1079,7 +1079,8 @@ static int _modbus_rtu_o_tcp_check_integrity(modbus_t *ctx, uint8_t *msg, const 
         return 0;
     }
 
-    crc_calculated = crc16(msg, msg_length - 2);
+    //+6/-6 for skip tcp header, -2 for cut crc
+    crc_calculated = crc16((msg+6), msg_length - 2 - 6);
     crc_received = (msg[msg_length - 1] << 8) | msg[msg_length - 2];
 
     /* Check CRC of msg */
